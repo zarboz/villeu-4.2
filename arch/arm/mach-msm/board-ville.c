@@ -28,7 +28,6 @@
 #include <linux/spi/spi.h>
 #include <linux/slimbus/slimbus.h>
 #include <linux/bootmem.h>
-#include <linux/msm_kgsl.h>
 #ifdef CONFIG_ANDROID_PMEM
 #include <linux/android_pmem.h>
 #endif
@@ -84,6 +83,7 @@
 #include <mach/msm_rtb.h>
 #include <mach/msm_cache_dump.h>
 #include <mach/scm.h>
+#include <mach/kgsl.h>
 #include <linux/fmem.h>
 
 #include <linux/akm8975.h>
@@ -813,12 +813,18 @@ static struct spi_board_info rawchip_spi_board_info[] __initdata = {
 #endif
 
 #ifdef CONFIG_HTC_BATT_8960
+#ifdef CONFIG_HTC_PNPMGR
+extern int pnpmgr_battery_charging_enabled(int charging_enabled);
+#endif 
+static int critical_alarm_voltage_mv[] = {3000, 3200, 3400};
+
 static struct htc_battery_platform_data htc_battery_pdev_data = {
 	.guage_driver = 0,
 	.chg_limit_active_mask = HTC_BATT_CHG_LIMIT_BIT_TALK |
 								HTC_BATT_CHG_LIMIT_BIT_NAVI,
-	.critical_low_voltage_mv = 3200,
-	.critical_alarm_voltage_mv = 3000,
+	.critical_low_voltage_mv = 3100,
+	.critical_alarm_vol_ptr = critical_alarm_voltage_mv,
+	.critical_alarm_vol_cols = sizeof(critical_alarm_voltage_mv) / sizeof(int),
 	.overload_vol_thr_mv = 4000,
 	.overload_curr_thr_ma = 0,
 	
@@ -837,6 +843,9 @@ static struct htc_battery_platform_data htc_battery_pdev_data = {
 						cable_detect_register_notifier,
 	.icharger.dump_all = pm8921_dump_all,
 	.icharger.get_attr_text = pm8921_charger_get_attr_text,
+	.icharger.max_input_current =pm8921_set_hsml_target_ma,
+	.icharger.is_safty_timer_timeout = pm8921_is_chg_safety_timer_timeout,
+	.icharger.is_battery_full_eoc_stop = pm8921_is_batt_full_eoc_stop,
 	
 	.igauge.name = "pm8921",
 	.igauge.get_battery_voltage = pm8921_get_batt_voltage,
@@ -853,6 +862,10 @@ static struct htc_battery_platform_data htc_battery_pdev_data = {
 	.igauge.enable_lower_voltage_alarm = pm8xxx_batt_lower_alarm_enable,
 	.igauge.set_lower_voltage_alarm_threshold =
 						pm8xxx_batt_lower_alarm_threshold_set,
+	
+#ifdef CONFIG_HTC_PNPMGR
+	.notify_pnpmgr_charging_enabled = pnpmgr_battery_charging_enabled,
+#endif 
 };
 
 static struct platform_device htc_battery_pdev = {
@@ -3015,39 +3028,6 @@ static struct msm_spm_platform_data msm_spm_data[] __initdata = {
 	},
 };
 
-#ifdef CONFIG_PERFLOCK
-static unsigned ville_perf_acpu_table[] = {
-	594000000, 
-	810000000, 
-	1026000000, 
-	1134000000,
-	1512000000, 
-};
-
-static struct perflock_data ville_perflock_data = {
-	.perf_acpu_table = ville_perf_acpu_table,
-	.table_size = ARRAY_SIZE(ville_perf_acpu_table),
-};
-
-static struct perflock_data ville_cpufreq_ceiling_data = {
-	.perf_acpu_table = ville_perf_acpu_table,
-	.table_size = ARRAY_SIZE(ville_perf_acpu_table),
-};
-
-static struct perflock_pdata perflock_pdata = {
-       .perf_floor = &ville_perflock_data,
-       .perf_ceiling = &ville_cpufreq_ceiling_data,
-};
-
-struct platform_device msm8960_device_perf_lock = {
-       .name = "perf_lock",
-       .id = -1,
-       .dev = {
-               .platform_data = &perflock_pdata,
-       },
-};
-#endif
-
 static uint8_t l2_spm_wfi_cmd_sequence[] __initdata = {
 			0x00, 0x20, 0x03, 0x20,
 			0x00, 0x0f,
@@ -3766,13 +3746,33 @@ static void __init msm8960_i2c_init(void)
 
 static void __init msm8960_gfx_init(void)
 {
+	struct kgsl_device_platform_data *kgsl_3d0_pdata =
+		msm_kgsl_3d0.dev.platform_data;
 	uint32_t soc_platform_version = socinfo_get_version();
-	if (SOCINFO_VERSION_MAJOR(soc_platform_version) == 1) {
-		struct kgsl_device_platform_data *kgsl_3d0_pdata =
-				msm_kgsl_3d0.dev.platform_data;
-		kgsl_3d0_pdata->pwrlevel[0].gpu_freq = 320000000;
-		kgsl_3d0_pdata->pwrlevel[1].gpu_freq = 266667000;
-		kgsl_3d0_pdata->nap_allowed = false;
+
+	
+	if (cpu_is_msm8960ab()) {
+		kgsl_3d0_pdata->chipid = ADRENO_CHIPID(3, 2, 1, 0);
+		
+		kgsl_3d0_pdata->pwrlevel[1].gpu_freq = 320000000;
+	} else {
+		kgsl_3d0_pdata->iommu_count = 1;
+		if (SOCINFO_VERSION_MAJOR(soc_platform_version) == 1) {
+			kgsl_3d0_pdata->pwrlevel[0].gpu_freq = 320000000;
+			kgsl_3d0_pdata->pwrlevel[1].gpu_freq = 266667000;
+		}
+		if (SOCINFO_VERSION_MAJOR(soc_platform_version) >= 3) {
+			kgsl_3d0_pdata->chipid = ADRENO_CHIPID(2, 2, 0, 6);
+		}
+	}
+
+	
+	platform_device_register(&msm_kgsl_3d0);
+
+	
+	if (!cpu_is_msm8960ab()) {
+		platform_device_register(&msm_kgsl_2d0);
+		platform_device_register(&msm_kgsl_2d1);
 	}
 }
 
